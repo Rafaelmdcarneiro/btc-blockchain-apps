@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const program = require('commander');
+const { Wallet } = require('../ts_build/src/wallet');
+const promptly = require('promptly');
+
+program
+  .version(require('../package.json').version)
+  .requiredOption('--name <name>', 'REQUIRED - Wallet Name')
+  .option('--gap <gap>', 'optional - UTXO chains only: Number of consecutive unused addresses to derive (will derive that many change addresses too) (default 20)')
+  .option('--noChange', 'optional - UTXO chains only: Should not derive change addresses')
+  .option('--startIdx <index>', 'optional - Starting address index. (default the wallet\'s next index)')
+  .option('--printIndex', 'optional - Print the wallet\'s next index (it will not derive addresses)')
+  .option('--storageType <storageType>', 'optional - Name of the database to use (default Level)')
+  .option('--path <path>', 'optional - Custom wallet storage path')
+  .parse(process.argv);
+
+let wallet;
+
+const main = async () => {
+  const { name, path, storageType = 'Level', printIndex = false } = program.opts();
+  let { gap, startIdx, noChange = false } = program.opts();
+
+  if (printIndex) {
+    wallet = await Wallet.loadWallet({ name, path, storageType });
+    console.log('Next address index:', wallet.addressIndex);
+    return;
+  }
+  
+  try {
+    const password = await promptly.password('Wallet Password:');
+    wallet = await Wallet.loadWallet({ name, path, storageType });
+    wallet = await wallet.unlock(password);
+
+    let unusedAddressCounter = 0;
+
+    let index = !isNaN(parseInt(startIdx)) ? parseInt(startIdx) : (wallet.addressIndex || 0);
+    gap = !isNaN(parseInt(gap)) ? parseInt(gap) : 20;
+    if (!wallet.isUtxoChain()) {
+      gap = 1;
+      noChange = true;
+    }
+
+    while (unusedAddressCounter < gap) {
+      const address = await wallet.generateAddressPair(index, !noChange);
+
+      const transactions = await wallet.client.getAddressTxos({ address });
+
+      if (!transactions.length || !wallet.isUtxoChain()) {
+        unusedAddressCounter++;
+      } else {
+        unusedAddressCounter = 0;
+      }
+      if (!noChange) {
+        console.log(`Current change index: ${index}: ${address}`);
+      } else {
+        console.log(`Current address index: ${index}: ${address}`);
+      }
+      index++;
+    }
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+main()
+  .catch(console.error)
+  .finally(() => wallet?.storage?.close());

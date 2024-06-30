@@ -1,0 +1,149 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const CWC = require('crypto-wallet-core');
+const program = require('commander');
+const { Wallet } = require('../../ts_build/src/wallet');
+const promptly = require('promptly');
+const bitcoreLibs = {
+  BTC: CWC.BitcoreLib,
+  DOGE: CWC.BitcoreLibDoge,
+  LTC: CWC.BitcoreLibLtc,
+  BCH: CWC.BitcoreLibCash
+};
+
+program
+  .version(require('../../package.json').version)
+  .requiredOption('--path <path>', 'REQUIRED - Filepath where wallet is stored')
+  .requiredOption('--m <m>', 'REQUIRED - Number of signers required')
+  .requiredOption('--currency <currency>', 'REQUIRED - currency. [BTC, DOGE, LTC, BCH]')
+  .requiredOption('--depth <depth>', 'REQUIRED - Number of addresses to derive (will derive that many change addresses too)')
+  .requiredOption('--network <network>', 'REQUIRED - Network to derive for')
+  .option('--input <input>', 'optional - A json string to parse in the form {"xpubkey": "mXy1234"}')
+  .option('--file <file>', 'optional - A jsonl file with {"xpubkey": "mXy1234"} in it')
+  .option('--prompt', 'optional - Ask for the xpubkeys to derive from')
+  .option('--exportToFile <file>', 'optional flag - Export addresses')
+  .option('--importFromFile <file>', 'optional flag - Import exported addresses')
+  .option('--bech32', 'optional - Use this flag if you need bech32 addresses')
+  .parse(process.argv);
+
+const getFileKeys = file => {
+  let contents = fs.readFileSync(file).toString();
+  let fileKeys = contents
+    .split('\n')
+    .filter(line => line !== '')
+    .map(line => JSON.parse(line));
+  return fileKeys;
+};
+
+const parseKeys = keys => {
+  let parsed = JSON.parse(keys);
+  if (typeof parsed === 'object') {
+    return [parsed];
+  } else {
+    return parsed;
+  }
+};
+
+function getAddress(publicKeyRing, addressIndex, isChange, m, network, currency) {
+  const publicKeys = publicKeyRing.map(function(key) {
+    const xpub = new bitcoreLibs[currency].HDPublicKey(key.xpubkey);
+    const changeNum = isChange ? 1 : 0;
+    let path = key.path ? key.path : `m/${changeNum}/${addressIndex}`;
+    if (key.path) {
+      let split = path.split('/');
+      split[split.length -1] = Number(split[split.length - 1]) + addressIndex;
+      path = split.join('/');
+    }
+    if (isChange && key.changePath) {
+      path = key.changePath
+      let split = path.split('/');
+      split[split.length -1] = Number(split[split.length - 1]) + addressIndex;
+      path = split.join('/');
+    }
+    return xpub.derive(path).publicKey;
+  });
+  let nestedWitness;
+  let type;
+  if (program.opts().bech32) {
+    nestedWitness = false;
+    type = 'witnessscripthash';
+  }
+  return bitcoreLibs[currency].Address.createMultisig(publicKeys, m, network, nestedWitness, type);
+}
+
+function getAllAddresses(publicKeyRing, numberOfAddresses, isChange, m, network, currency) {
+  let addresses = [];
+  for (let i = 0; i < numberOfAddresses; i++) {
+    const address = getAddress(publicKeyRing, i, isChange, m, network, currency);
+    addresses.push({ address: address.toString() });
+    console.log('address', address.toString(), i);
+  }
+  return addresses;
+}
+
+async function readFromPrompt() {
+  let counter = 1;
+  let xpubkey = await promptly.prompt(`Enter xpubkey ${counter} `);
+  let promptResults = [];
+  while (xpubkey.trim() != '') {
+    promptResults.push(xpubkey);
+    counter++;
+    xpubkey = await promptly.prompt(`Enter xpubkey ${counter} `, { default: '' });
+  }
+  return promptResults;
+}
+
+async function importAddressesToWallet(path, addresses) {
+  const password = await promptly.password('Wallet Password:');
+  if (!password) {
+    throw new Error('No password provided. Keys can\'t be imported without unlocking the wallet');
+  }
+  wallet = await Wallet.loadWallet({ path });
+  wallet = await wallet.unlock(password);
+  await wallet.importKeys({ keys: addresses });
+  console.log(`${addresses.length} Adresses Imported`);
+}
+
+let wallet;
+
+const main = async () => {
+  const { file, input, prompt, importFromFile, m, network, exportToFile, depth, currency } = program.opts();
+  if (!currency || !['BTC', 'DOGE', 'LTC', 'BCH'].includes(currency)) {
+    throw new Error('Invalid currency. Currency must be BTC, DOGE, LTC, or BCH');
+  }
+  let keyInput = [];
+  try {
+    if (file) {
+      keyInput = getFileKeys(file);
+    } else if (input) {
+      keyInput = parseKeys(input);
+    } else if (prompt) {
+      keyInput = await readFromPrompt();
+    }
+    const mOfN = Number(m);
+    let results = getAllAddresses(keyInput, depth, false, mOfN, network, currency);
+    let changeResult = getAllAddresses(keyInput, depth, true, mOfN, network, currency);
+    const allAddresses = [].concat(results, changeResult);
+    if (keyInput.length < mOfN) {
+      throw new Error(`You must enter at least ${m} xpubkeys`);
+    }
+
+    if (exportToFile) {
+      allAddresses.forEach(function(result) {
+        fs.appendFileSync(exportToFile, `${JSON.stringify(result)}\n`, 'utf8');
+      });
+      console.log(`Exported Addresses to ${exportToFile}`);
+    }
+
+    if (importFromFile) {
+      await importAddressesToWallet(importAddresses, allAddresses);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+main()
+  .catch(console.error)
+  .finally(() => wallet?.storage?.close());

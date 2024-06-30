@@ -1,0 +1,29 @@
+#!/usr/bin/env node
+
+const program = require('commander');
+const { Wallet } = require('../ts_build/src/wallet');
+
+program
+  .version(require('../package.json').version)
+  .requiredOption('--name <name>', 'REQUIRED - Wallet Name')
+  .option('--baseUrl <url>', 'optional - Change configured wallet baseUrl')
+  .option('--storageType <storageType>', 'optional - Name of the database to use (default: Level)')
+  .option('--path <path>', 'optional - Custom wallet storage path')
+  .parse(process.argv);
+
+let wallet;
+
+const main = async () => {
+  const { name, path, baseUrl, storageType } = program.opts();
+  try {
+    wallet = await Wallet.loadWallet({ name, path, storageType });
+    await wallet.register({ baseUrl });
+    console.log('Wallet registered!');
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+main()
+  .catch(console.error)
+  .finally(() => wallet?.storage?.close());

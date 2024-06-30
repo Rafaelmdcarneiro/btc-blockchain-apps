@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+
+'use strict';
+
+const program = require('commander');
+const { Wallet } = require('../ts_build/src/wallet');
+const promptly = require('promptly');
+const https = require('https');
+const { Web3, xrpl } = require('crypto-wallet-core');
+
+program
+  .version(require('../package.json').version)
+  .requiredOption('--name <name>', 'REQUIRED - Wallet Name')
+  .requiredOption('--to <to>', 'REQUIRED - String address')
+  .requiredOption('--amount <amount>', 'REQUIRED - Number amount (in btc/bch/eth/xrp)')
+  .option('--token <token>', 'optional - ERC-20 token to send')
+  .option('--feeRate <rate>', 'optional - Fee rate in sats/byte (UTXO), Gwei (EVM), or drops (XRP)')
+  .option('--rbf', 'optional - Enable Replace-by-Fee')
+  .option('--tag <tag>', 'optional - Destination tag (XRP only)')
+  .option('--storageType <storageType>', 'optional - Name of the database to use (default Level)')
+  .option('--path <path>', 'optional - Custom wallet storage path')
+  .parse(process.argv);
+
+let wallet;
+
+const main = async () => {
+  const { name, path, to, amount, token, storageType, rbf, tag } = program.opts();
+  let { feeRate: feeRateParam } = program.opts();
+  let data;
+  try {
+    data = await getCurrencies();
+  } catch (err) {
+    console.error(err);
+  }
+  const currencies = JSON.parse(data);
+  try {
+    wallet = await Wallet.loadWallet({ name, path, storageType });
+    const chain = wallet.chain;
+    const currency = token || chain;
+    const { decimals } = currencies.data.find(element => element.code === currency);
+    const scale = Math.pow(10, decimals);
+    const lastAddress = await wallet.deriveAddress(0);
+    const recipients = [{ address: to, amount: amount * scale }];
+    const utxos = await wallet.getUtxosArray();
+    const params = {
+      utxos,
+      recipients,
+      from: lastAddress,
+      token,
+      replaceByFee: rbf,
+      tag
+    };
+    
+    let feeRate = feeRateParam;
+    if (!feeRate) {
+      const feerate = await wallet.getNetworkFee();
+      feeRate = feerate.feerate;
+    }
+
+    if (wallet.chain.toUpperCase() === 'XRP') {
+      params.nonce = parseInt(await wallet.getNonce());
+      params.fee = feeRateParam == null ? feeRate : parseInt(feeRateParam);
+      console.log('Fee:', params.fee, 'drops'); // XRP doesn't really have a fee "rate"
+    } else if (!wallet.isUtxoChain()) {
+      params.nonce = parseInt(await wallet.getNonce());
+      params.feeRate = feeRateParam == null ? feeRate : parseInt(Web3.utils.toWei(feeRateParam.toString(), 'gwei')); // convert feeRateParam from Gwei to Wei
+      console.log('Fee rate:', Web3.utils.fromWei(params.feeRate.toString(), 'Gwei'), 'Gwei');
+    } else {
+      params.feeRate = Math.ceil(feeRateParam == null ? (feeRate * scale) : feeRateParam); // convert feeRate from BTC to sats/B
+      console.log('Fee rate:', params.feeRate, 'sats/byte');
+    }
+
+    params.change = !wallet.isUtxoChain() ? null : wallet.deriveAddress(wallet.addressIndex, true);
+    const changeIdx = params.change ? wallet.addressIndex : null;
+    const tx = await wallet.newTx(params);
+    console.log('UnsignedRawTx: ', tx);
+    const passphrase = await promptly.password('Wallet Password:');
+    wallet = await wallet.unlock(passphrase);
+    const signedTx = await wallet.signTx({ tx, passphrase, changeAddressIdx: changeIdx });
+    console.log('SignedRawTx: ', signedTx);
+    const confirmed = await promptly.confirm('Broadcast? (y/n)');
+    if (!confirmed) {
+      return;
+    }
+    const transaction = await wallet.broadcast({ tx: signedTx });
+    console.log('Txid: ', transaction.txid);
+    console.log('Transaction broadcasted');
+  } catch (e) {
+    console.error(e);
+  }
+};
+
+function getCurrencies() {
+  return new Promise((resolve, reject) => {
+    https.get('https://bitpay.com/currencies', res => {
+      if (res.statusCode !== 200) {
+        reject(new Error('Request Failed'));
+      }
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => resolve(data.toString()));
+    });
+  });
+}
+
+main()
+  .catch(console.error)
+  .finally(() => wallet?.storage?.close());

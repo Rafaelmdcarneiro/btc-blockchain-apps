@@ -1,0 +1,31 @@
+#!/usr/bin/env node
+
+const program = require('commander');
+const { Wallet } = require('../ts_build/src/wallet');
+const promptly = require('promptly');
+
+program
+  .version(require('../package.json').version)
+  .requiredOption('--name <name>', 'REQUIRED - Wallet Name')
+  .option('--storageType <storageType>', 'optional - name of the database to use (default Level)')
+  .option('--path <path>', 'optional - Custom wallet storage path')
+  .parse(process.argv);
+
+let wallet
+
+const main = async () => {
+  const { name, path, storageType = 'Level' } = program.opts();
+  try {
+    const password = await promptly.password('Wallet Password:');
+    wallet = await Wallet.loadWallet({ name, path, storageType });
+    await wallet.unlock(password);
+    console.log(wallet);
+  } catch (e) {
+    console.log(e);
+    console.error('Unable to decrypt wallet');
+  }
+};
+
+main()
+  .catch(console.error)
+  .finally(() => wallet?.storage?.close());
